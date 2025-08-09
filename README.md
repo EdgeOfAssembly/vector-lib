@@ -47,7 +47,7 @@ This library is dual-licensed:
 
 - BSD 3-Clause License: For commercial use. Contact Stefan Fröberg at haxbox2000@gmail.com (mailto:haxbox2000@gmail.com) to obtain a commercial license. A fee may apply, and upon agreement, you will receive the BSD 3-Clause license, allowing proprietary use and distribution.
 
-Note: By default, the library is distributed under GPLv3 (LICENSE.GPL). The BSD 3-Clause license is not included in the repository and must be obtained directly from the author for commercial use.
+**Note:** By default, the library is distributed under GPLv3 (LICENSE.GPL). The BSD 3-Clause license is not included in the repository and must be obtained directly from the author for commercial use.
 
 ## Contributing
 
