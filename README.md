@@ -34,10 +34,10 @@ A thread-safe, type-agnostic dynamic array library for C, inspired by C++'s `std
 See example.c for a complete example.
 
 To run the example, compile it with a C compiler (e.g., gcc):
-    ```bash
+```bash
 gcc -std=c99 -pthread example.c -o example
 ./example
-    ```
+```
 
 ## Licensing
 
