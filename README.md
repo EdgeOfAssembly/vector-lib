@@ -32,8 +32,8 @@ A thread-safe, type-agnostic dynamic array library for C, inspired by C++'s `std
 ## Usage
 
 See example.c for a complete example. Basic usage:
-    ```bash
 
+    ```c
 #include "vector.h"
 #include <stdio.h>
 
