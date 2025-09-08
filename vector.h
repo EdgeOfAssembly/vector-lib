@@ -517,12 +517,8 @@ static int _vector_append_internal(vector* vec, size_t num_values,
         vec->capacity = new_capacity;
     }
     
-    size_t append_offset, append_bytes;
-    if (_safe_mul(vec->length, vec->element_size, &append_offset) == -1 ||
-        _safe_mul(num_values, vec->element_size, &append_bytes) == -1)
-        return -1;
-    
-    memcpy((char*)vec->data + append_offset, values, append_bytes);
+    memcpy((char*)vec->data + vec->length * vec->element_size, values,
+           num_values * vec->element_size);
     vec->length = total_elements;
     return 0;
 }
@@ -718,24 +714,13 @@ static int _vector_insert_internal(vector* vec, size_t index, size_t num_values,
     }
     if (index < vec->length)
     {
-        size_t dest_offset, src_offset, move_bytes;
-        if (_safe_add(index, num_values, &dest_offset) == -1 ||
-            _safe_mul(dest_offset, vec->element_size, &dest_offset) == -1 ||
-            _safe_mul(index, vec->element_size, &src_offset) == -1 ||
-            _safe_mul(vec->length - index, vec->element_size, &move_bytes) == -1)
-            return -1;
-        
-        memmove((char*)vec->data + dest_offset,
-                (char*)vec->data + src_offset,
-                move_bytes);
+        memmove((char*)vec->data + (index + num_values) * vec->element_size,
+                (char*)vec->data + index * vec->element_size,
+                (vec->length - index) * vec->element_size);
     }
     
-    size_t insert_offset, insert_bytes;
-    if (_safe_mul(index, vec->element_size, &insert_offset) == -1 ||
-        _safe_mul(num_values, vec->element_size, &insert_bytes) == -1)
-        return -1;
-    
-    memcpy((char*)vec->data + insert_offset, values, insert_bytes);
+    memcpy((char*)vec->data + index * vec->element_size, values,
+           num_values * vec->element_size);
     vec->length = total_elements;
     return 0;
 }
