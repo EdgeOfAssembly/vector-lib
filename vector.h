@@ -28,19 +28,28 @@
 #ifndef __VECTOR_H__
 #define __VECTOR_H__
 
+/* Enable POSIX and GNU features for complete pthread support */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#ifndef _POSIX_C_SOURCE  
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 /* Includes */
 #include <stddef.h>  /* size_t, max_align_t */
 #include <stdio.h>   /* fprintf, FILE */
 #include <stdlib.h>  /* malloc, free, realloc, qsort, aligned_alloc */
 #include <string.h>  /* memcpy, memmove, memset */
 #include <stdarg.h>  /* va_list, vsnprintf */
-#include <stdint.h>  /* SIZE_MAX, uint64_t, ssize_t */
+#include <stdint.h>  /* SIZE_MAX, uint64_t */
 #include <stdbool.h>
+#include <sys/types.h> /* ssize_t */
 #include "align.h"   /* alignof, alignas */
 
 #if defined(_WIN32)
 #include <windows.h> /* SRWLOCK */
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__unix__) || defined(__APPLE__)
 #include <pthread.h> /* pthread_rwlock_t */
 #endif
 
@@ -65,18 +74,18 @@ typedef struct {
     } allocator;         /* Custom allocator functions */
 #if defined(_WIN32)
     SRWLOCK rwlock;      /* Windows read-write lock */
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__unix__) || defined(__APPLE__)
     pthread_rwlock_t rwlock; /* POSIX read-write lock */
 #endif
 } vector;
 
 /* Thread-local storage for sorting */
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-    _Thread_local static vector* _sort_context;
-    _Thread_local static int (*_sort_compar)(const void*, const void*, void*);
+    static _Thread_local vector* _sort_context;
+    static _Thread_local int (*_sort_compar)(const void*, const void*, void*);
 #elif defined(__GNUC__) || defined(__clang__)
-    __thread static vector* _sort_context;
-    __thread static int (*_sort_compar)(const void*, const void*, void*);
+    static __thread vector* _sort_context;
+    static __thread int (*_sort_compar)(const void*, const void*, void*);
 #else
     static vector* _sort_context;
     static int (*_sort_compar)(const void*, const void*, void*);
@@ -105,11 +114,14 @@ static int _vector_swap_internal(vector* vec, size_t idx1, size_t idx2);
 static void vector_rdlock(vector* vec);
 static void vector_wrlock(vector* vec);
 static void vector_unlock(vector* vec);
+static void vector_unlock_shared(vector* vec);
+static void vector_unlock_exclusive(vector* vec);
 static int _safe_add(size_t a, size_t b, size_t* result);
 static int _safe_mul(size_t a, size_t b, size_t* result);
 static void* default_alloc(size_t size);
 static void* default_realloc(void* ptr, size_t size);
 static void default_free(void* ptr);
+static void vector_free_element(vector* vec, void* element);
 
 /* Public API Macros and Functions */
 
@@ -137,11 +149,12 @@ static void default_free(void* ptr);
 /* Returns: pointer to element, NULL if invalid */
 #define vector_at(type, vec, index) \
     ({ \
-        vector_rdlock(vec); \
-        type* _ptr = (type*)_vector_at(vec, index); \
-        if (!_ptr) _vector_error("Invalid vector or index %zu out of bounds " \
-                                 "(length: %zu)", index, vec ? vec->length : 0); \
-        vector_unlock(vec); \
+        type* _ptr = NULL; \
+        if (vec) { \
+            vector_rdlock(vec); \
+            _ptr = (type*)_vector_at(vec, index); \
+            vector_unlock_shared(vec); \
+        } \
         _ptr; \
     })
 
@@ -188,7 +201,7 @@ static vector* vector_copy(const vector* src)
         memcpy(dst->data, src->data, src->length * src->element_size);
         dst->length = src->length;
     }
-    vector_unlock((vector*)src);
+    vector_unlock_shared((vector*)src);
     return dst;
 }
 
@@ -212,7 +225,7 @@ static vector* vector_copy(const vector* src)
                  ++ptr) { \
                 /* User code here */ \
             } \
-            vector_unlock(vec); \
+            vector_unlock_shared(vec); \
         } \
     } while (0)
 
@@ -235,7 +248,7 @@ static void vector_free(vector* vec)
         vector_unlock(vec);
 #if defined(_WIN32)
         /* SRWLOCK does not require destruction */
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__unix__) || defined(__APPLE__)
         pthread_rwlock_destroy(&vec->rwlock);
 #endif
         free(vec);
@@ -267,10 +280,38 @@ static void vector_free(vector* vec)
 /* Returns: length of vector, 0 if NULL */
 #define vector_length(vec) ((vec) ? (vec)->length : 0)
 
-/* Removes and returns last element */
+/* Removes and returns last element - CALLER MUST FREE RETURNED POINTER */
 /* Args: type - element type, vec - vector pointer */
 /* Returns: pointer to popped element, NULL on failure */
+/* NOTE: The returned pointer must be freed using vector_free_element() */
 #define vector_pop(type, vec) ((type*)_vector_pop_internal(vec))
+
+/* Pops last element into user-provided storage (safer alternative) */
+/* Args: type - element type, vec - vector pointer, dest - destination pointer */
+/* Returns: 0 on success, -1 on failure */
+#define vector_pop_to(type, vec, dest) \
+    ({ \
+        int _ret = -1; \
+        if ((vec) != NULL && (dest) != NULL) { \
+            vector_wrlock(vec); \
+            if (vec->length > 0) { \
+                void* last = (char*)vec->data + (vec->length - 1) * vec->element_size; \
+                memcpy(dest, last, vec->element_size); \
+                vec->length--; \
+                _ret = 0; \
+            } \
+            vector_unlock(vec); \
+        } \
+        _ret; \
+    })
+
+/* Frees element returned by vector_pop */
+/* Args: vec - vector pointer, element - element to free */
+static void vector_free_element(vector* vec, void* element)
+{
+    if (vec && element)
+        vec->allocator.free(element);
+}
 
 /* Macro to prepend values to vector */
 /* Args: vec - vector pointer, type - element type, ... - values to prepend */
@@ -348,7 +389,7 @@ static int vector_serialize(const vector* vec, FILE* fp)
     }
     vector_rdlock((vector*)vec);
     int result = _vector_serialize_internal(vec, fp);
-    vector_unlock((vector*)vec);
+    vector_unlock_shared((vector*)vec);
     return result;
 }
 
@@ -475,8 +516,13 @@ static int _vector_append_internal(vector* vec, size_t num_values,
         vec->data = new_data;
         vec->capacity = new_capacity;
     }
-    memcpy((char*)vec->data + vec->length * vec->element_size, values,
-           num_values * vec->element_size);
+    
+    size_t append_offset, append_bytes;
+    if (_safe_mul(vec->length, vec->element_size, &append_offset) == -1 ||
+        _safe_mul(num_values, vec->element_size, &append_bytes) == -1)
+        return -1;
+    
+    memcpy((char*)vec->data + append_offset, values, append_bytes);
     vec->length = total_elements;
     return 0;
 }
@@ -569,7 +615,7 @@ static vector* _vector_create_base(size_t element_size, size_t num_elements)
     vec->element_size = element_size;
 #if defined(_WIN32)
     InitializeSRWLock(&vec->rwlock);
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__unix__) || defined(__APPLE__)
     if (pthread_rwlock_init(&vec->rwlock, NULL) != 0)
     {
         vec->allocator.free(vec->data);
@@ -635,11 +681,11 @@ static ssize_t _vector_find_internal(vector* vec, const void* value,
         void* elem = (char*)vec->data + i * element_size;
         if (compar(elem, value, vec) == 0)
         {
-            vector_unlock(vec);
+            vector_unlock_shared(vec);
             return (ssize_t)i;
         }
     }
-    vector_unlock(vec);
+    vector_unlock_shared(vec);
     return -1;
 }
 
@@ -672,12 +718,24 @@ static int _vector_insert_internal(vector* vec, size_t index, size_t num_values,
     }
     if (index < vec->length)
     {
-        memmove((char*)vec->data + (index + num_values) * vec->element_size,
-                (char*)vec->data + index * vec->element_size,
-                (vec->length - index) * vec->element_size);
+        size_t dest_offset, src_offset, move_bytes;
+        if (_safe_add(index, num_values, &dest_offset) == -1 ||
+            _safe_mul(dest_offset, vec->element_size, &dest_offset) == -1 ||
+            _safe_mul(index, vec->element_size, &src_offset) == -1 ||
+            _safe_mul(vec->length - index, vec->element_size, &move_bytes) == -1)
+            return -1;
+        
+        memmove((char*)vec->data + dest_offset,
+                (char*)vec->data + src_offset,
+                move_bytes);
     }
-    memcpy((char*)vec->data + index * vec->element_size, values,
-           num_values * vec->element_size);
+    
+    size_t insert_offset, insert_bytes;
+    if (_safe_mul(index, vec->element_size, &insert_offset) == -1 ||
+        _safe_mul(num_values, vec->element_size, &insert_bytes) == -1)
+        return -1;
+    
+    memcpy((char*)vec->data + insert_offset, values, insert_bytes);
     vec->length = total_elements;
     return 0;
 }
@@ -940,7 +998,7 @@ static void vector_rdlock(vector* vec)
         return;
 #if defined(_WIN32)
     AcquireSRWLockShared(&vec->rwlock);
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__unix__) || defined(__APPLE__)
     pthread_rwlock_rdlock(&vec->rwlock);
 #endif
 }
@@ -953,22 +1011,42 @@ static void vector_wrlock(vector* vec)
         return;
 #if defined(_WIN32)
     AcquireSRWLockExclusive(&vec->rwlock);
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__unix__) || defined(__APPLE__)
     pthread_rwlock_wrlock(&vec->rwlock);
 #endif
 }
 
-/* Unlocks vector */
+/* Unlocks vector (shared) */
 /* Args: vec - vector pointer */
-static void vector_unlock(vector* vec)
+static void vector_unlock_shared(vector* vec)
 {
     if (!vec)
         return;
 #if defined(_WIN32)
-    ReleaseSRWLockExclusive(&vec->rwlock); /* Assumes write lock; adjust if needed */
-#elif defined(__linux__)
+    ReleaseSRWLockShared(&vec->rwlock);
+#elif defined(__linux__) || defined(__unix__) || defined(__APPLE__)
     pthread_rwlock_unlock(&vec->rwlock);
 #endif
+}
+
+/* Unlocks vector (exclusive) */
+/* Args: vec - vector pointer */
+static void vector_unlock_exclusive(vector* vec)
+{
+    if (!vec)
+        return;
+#if defined(_WIN32)
+    ReleaseSRWLockExclusive(&vec->rwlock);
+#elif defined(__linux__) || defined(__unix__) || defined(__APPLE__)
+    pthread_rwlock_unlock(&vec->rwlock);
+#endif
+}
+
+/* Unlocks vector - Use this for write locks */
+/* Args: vec - vector pointer */
+static void vector_unlock(vector* vec)
+{
+    vector_unlock_exclusive(vec);
 }
 
 /* Safe addition */
